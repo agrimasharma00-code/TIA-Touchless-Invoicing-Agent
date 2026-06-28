@@ -72,12 +72,17 @@ def _extract_name(text: str):
         if re.search(re.escape(name), text, flags=re.IGNORECASE):
             return name
 
-    named_match = re.search(r"(?:name|employee)\s*:\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})", text)
-    if named_match:
-        return named_match.group(1).strip()
-
-    for_match = re.search(r"for\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})\s+(?:at|with)", text)
-    return for_match.group(1).strip() if for_match else None
+    name_patterns = [
+        r"(?:name|employee|worker|staff|consultant)\s*[:\-]?\s*([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})",
+        r"for\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3})\s+(?:at|with|for client)",
+    ]
+    for pattern in name_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            candidate = _clean_person_candidate(match.group(1))
+            if candidate:
+                return candidate
+    return None
 
 
 def _extract_client(text: str):
@@ -90,10 +95,32 @@ def _extract_client(text: str):
         if token in lowered:
             return client
 
-    client_match = re.search(r"client(?:\s+name)?\s*:\s*([A-Z][A-Za-z0-9\s]+)", text, flags=re.IGNORECASE)
-    if client_match:
-        return client_match.group(1).strip()
+    client_patterns = [
+        r"client(?:\s+name)?\s*[:\-]?\s*([A-Z][A-Za-z0-9&. ]{2,60})",
+        r"(?:at|for)\s+([A-Z][A-Za-z0-9&. ]{2,60}?)(?:\s+for\s+June|\s+June|\s+worked|\s+timesheet|[,.\n])",
+    ]
+    for pattern in client_patterns:
+        client_match = re.search(pattern, text, flags=re.IGNORECASE)
+        if client_match:
+            return _clean_client_candidate(client_match.group(1))
     return None
+
+
+def _clean_person_candidate(candidate: str):
+    candidate = re.split(r",|\.|\n|\r", candidate.strip())[0].strip()
+    stop_phrases = {"Employee Attendance", "Handwritten Note", "Timesheet Input", "Client Unknown"}
+    if candidate in stop_phrases or len(candidate.split()) < 2:
+        return None
+    blocked_words = {"Client", "Worked", "Overtime", "June", "Timesheet", "UnknownCo"}
+    if any(word in blocked_words for word in candidate.split()):
+        return None
+    return candidate
+
+
+def _clean_client_candidate(candidate: str):
+    candidate = re.split(r",|\n|\r", candidate.strip())[0].strip()
+    candidate = re.sub(r"\s+(worked|working|overtime|employee|name).*$", "", candidate, flags=re.IGNORECASE).strip()
+    return candidate or None
 
 
 def _detect_document_type(text: str):

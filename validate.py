@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 
 ALLOWED_REIMBURSEMENTS = {"Travel", "Meals", "Equipment", "Medical", "Training"}
 MAX_WORKING_DAYS = 26
@@ -7,27 +7,72 @@ MAX_OT_HOURS = 50
 
 
 def validate_invoice(match_result: dict, extracted: dict):
+    extraction_issues = extracted.get("issues") or []
+    extraction_confidence = float(extracted.get("confidence") or 0)
+
     if match_result["match_status"] == "ambiguous":
         return {
             "status": "needs_review",
-            "issues": ["Multiple possible employee matches; human must confirm the correct roster record"],
+            "block_invoice": True,
+            "employee_name": extracted.get("employee_name"),
+            "client_name": extracted.get("client_name"),
+            "amount": None,
+            "currency": "AED",
+            "issues": ["Multiple possible employee matches; human must confirm the correct roster record"] + extraction_issues,
+            "warnings": [],
             "candidates": match_result["candidates"],
-            "rules": [],
+            "rules": [_rule("Employee in Client Roster", False, "More than one employee record matched")],
             "rules_passed": 0,
+            "next_action": "Select the correct employee before invoice generation.",
         }
 
     if match_result["match_status"] == "not_found":
+        missing = []
+        for key, label in [("emp_id", "Employee ID"), ("employee_name", "Employee name"), ("client_name", "Client"), ("working_days", "Working days")]:
+            if not extracted.get(key):
+                missing.append(label)
+        reason = "No matching employee record found in master data"
+        if missing:
+            reason += f"; missing or unreadable: {', '.join(missing)}"
         return {
             "status": "needs_review",
-            "issues": ["No matching employee record found in master data"],
-            "rules": [],
+            "block_invoice": True,
+            "employee_name": extracted.get("employee_name") or "Unknown employee",
+            "client_name": extracted.get("client_name") or "Unknown client",
+            "amount": None,
+            "currency": "AED",
+            "issues": [reason] + extraction_issues,
+            "warnings": ["A provisional invoice was not generated because payroll cannot be verified without a roster match."],
+            "rules": [_rule("Employee in Client Roster", False, reason)],
             "rules_passed": 0,
+            "invoice_breakdown": {
+                "extracted_only": True,
+                "employee_name": extracted.get("employee_name"),
+                "emp_id": extracted.get("emp_id"),
+                "client_name": extracted.get("client_name"),
+                "working_days": extracted.get("working_days"),
+                "overtime_hours": extracted.get("overtime_hours"),
+                "confidence": extraction_confidence,
+            },
+            "next_action": "Route to FinOps/HITL to verify employee identity, client roster, and payroll before invoicing.",
         }
 
     payroll = match_result["payroll"]
     employee = match_result["employee"]
     if not payroll:
-        return {"status": "needs_review", "issues": ["Employee matched but no payroll record found"], "rules": [], "rules_passed": 0}
+        return {
+            "status": "needs_review",
+            "block_invoice": True,
+            "employee_name": employee.get("Full Name") if employee else extracted.get("employee_name"),
+            "client_name": employee.get("Client Name") if employee else extracted.get("client_name"),
+            "amount": None,
+            "currency": "AED",
+            "issues": ["Employee matched but no payroll record found"] + extraction_issues,
+            "warnings": [],
+            "rules": [_rule("Payroll Record Exists", False, "Matched employee has no payroll row")],
+            "rules_passed": 0,
+            "next_action": "Add or verify payroll master data before invoice generation.",
+        }
 
     working_days = _coalesce_int(extracted.get("working_days"), payroll.get("Working Days"), MAX_WORKING_DAYS)
     overtime_hours = float(extracted.get("overtime_hours") or 0)
@@ -43,7 +88,7 @@ def validate_invoice(match_result: dict, extracted: dict):
     deductions = round(deduction_days * basic / MAX_WORKING_DAYS, 2)
     approved_reimbursements = [r for r in reimbursements if r.get("allowed", r.get("category") in ALLOWED_REIMBURSEMENTS)]
     rejected_reimbursements = [r for r in reimbursements if r not in approved_reimbursements]
-    reimbursement_total = round(sum(float(r["amount"]) for r in approved_reimbursements), 2)
+    reimbursement_total = round(sum(float(r["amount"] or 0) for r in approved_reimbursements), 2)
     net_pay = round(gross + ot_amount + reimbursement_total - deductions, 2)
 
     reimbursement_lines_complete = all(r.get("reason") and r.get("amount") is not None for r in reimbursements)
@@ -56,7 +101,7 @@ def validate_invoice(match_result: dict, extracted: dict):
         _rule("Reimbursements Valid", reimbursement_lines_complete, "Every reimbursement line has reason and amount"),
         _rule("Net Pay Formula Correct", True, f"{gross} + {ot_amount} + {reimbursement_total} - {deductions} = {net_pay}"),
     ]
-    issues = [r["reason"] for r in rules if r["status"] == "FAIL"]
+    issues = [r["reason"] for r in rules if r["status"] == "FAIL"] + extraction_issues
     warnings = []
 
     confidence = float(extracted.get("confidence") or 0.9)
@@ -87,14 +132,17 @@ def validate_invoice(match_result: dict, extracted: dict):
 
     return {
         "status": status,
+        "block_invoice": False,
         "amount": net_pay,
         "currency": payroll.get("Currency", "AED"),
         "employee_name": payroll.get("Employee Name"),
+        "client_name": payroll.get("Client Name"),
         "issues": issues,
         "warnings": warnings,
         "rules": rules,
         "rules_passed": len([r for r in rules if r["status"] == "PASS"]),
         "invoice_breakdown": breakdown,
+        "next_action": "Auto-approved for invoice generation." if status == "approved" else "Route to HITL review; invoice generated as draft only after confirmation.",
     }
 
 
